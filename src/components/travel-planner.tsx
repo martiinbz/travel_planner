@@ -893,6 +893,8 @@ function PlacesByCategoryPanel({
         </div>
       </div>
 
+      <PlacesOverviewMap places={places} />
+
       <div className="mt-5 grid gap-4">
         {grouped.length ? (
           grouped.map((group) => (
@@ -964,6 +966,159 @@ function PlacesByCategoryPanel({
         )}
       </div>
     </section>
+  );
+}
+
+function PlacesOverviewMap({ places }: { places: Place[] }) {
+  const mappablePlaces = places.filter(
+    (place) =>
+      place.address.trim() &&
+      Number.isFinite(place.lat) &&
+      Number.isFinite(place.lng),
+  );
+
+  return (
+    <div className="mt-4 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2">
+        <div>
+          <p className="text-xs font-black uppercase text-emerald-700">Mapa de sitios</p>
+          <p className="text-sm text-slate-500">
+            {mappablePlaces.length
+              ? `${mappablePlaces.length} sitios con dirección`
+              : "Añade sitios con dirección para verlos aquí"}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {placeCategories.map((category) => (
+            <span key={category.value} className="inline-flex items-center gap-1 text-xs font-bold text-slate-500">
+              <span className={cn("h-2.5 w-2.5 rounded-full", category.color)} />
+              {category.label}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="relative min-h-[260px] sm:min-h-[340px]">
+        {mappablePlaces.length ? (
+          GOOGLE_MAPS_API_KEY ? (
+            <GooglePlacesOverviewMap apiKey={GOOGLE_MAPS_API_KEY} places={mappablePlaces} />
+          ) : (
+            <FallbackPlacesOverviewMap places={mappablePlaces} />
+          )
+        ) : (
+          <div className="grid min-h-[260px] place-items-center p-6 text-center text-sm font-semibold text-slate-500">
+            Cuando guardes sitios con dirección, aparecerán marcados por categoría.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GooglePlacesOverviewMap({
+  apiKey,
+  places,
+}: {
+  apiKey: string;
+  places: Place[];
+}) {
+  const mapNodeRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<google.maps.Marker[]>([]);
+  const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleMaps(apiKey)
+      .then(() => {
+        if (!cancelled) {
+          setIsReady(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsReady(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey]);
+
+  useEffect(() => {
+    if (!isReady || !mapNodeRef.current || mapRef.current) {
+      return;
+    }
+
+    mapRef.current = new google.maps.Map(mapNodeRef.current, {
+      center: { lat: places[0].lat, lng: places[0].lng },
+      fullscreenControl: false,
+      mapTypeControl: false,
+      streetViewControl: false,
+      zoom: 13,
+    });
+  }, [isReady, places]);
+
+  useEffect(() => {
+    if (!isReady || !mapRef.current) {
+      return;
+    }
+
+    markersRef.current.forEach((marker) => marker.setMap(null));
+    const bounds = new google.maps.LatLngBounds();
+
+    markersRef.current = places.map((place) => {
+      bounds.extend({ lat: place.lat, lng: place.lng });
+      const marker = new google.maps.Marker({
+        map: mapRef.current,
+        position: { lat: place.lat, lng: place.lng },
+        title: place.name,
+        icon: categoryMarkerIcon(place.category),
+      });
+      const infoWindow = new google.maps.InfoWindow({
+        content: `<strong>${escapeHtml(place.name)}</strong><br>${escapeHtml(categoryLabel(place.category))}<br>${escapeHtml(place.address)}`,
+      });
+      marker.addListener("click", () => infoWindow.open({ map: mapRef.current, anchor: marker }));
+      return marker;
+    });
+
+    if (places.length > 1) {
+      mapRef.current.fitBounds(bounds, 48);
+    } else {
+      mapRef.current.setCenter({ lat: places[0].lat, lng: places[0].lng });
+      mapRef.current.setZoom(14);
+    }
+  }, [isReady, places]);
+
+  return <div ref={mapNodeRef} className="absolute inset-0" />;
+}
+
+function FallbackPlacesOverviewMap({ places }: { places: Place[] }) {
+  const bounds = getBounds(places);
+  const points = places.map((place) => ({
+    place,
+    position: normalizePosition(place, bounds),
+  }));
+
+  return (
+    <div className="absolute inset-0 overflow-hidden">
+      <div className="map-grid absolute inset-0" />
+      {points.map(({ place, position }) => {
+        const category = placeCategories.find((item) => item.value === place.category);
+        return (
+          <div
+            key={place.id}
+            className="absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${position.x}%`, top: `${position.y}%` }}
+            title={place.name}
+          >
+            <div className={cn("grid h-8 w-8 place-items-center rounded-full text-xs font-black text-white ring-4 ring-white", category?.color)}>
+              {categoryLabel(place.category).slice(0, 1)}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1575,7 +1730,6 @@ function GoogleAutocompleteInput({
 
         autocomplete = new google.maps.places.Autocomplete(inputRef.current, {
           fields: ["formatted_address", "geometry", "name", "place_id", "types", "vicinity"],
-          types: ["establishment", "tourist_attraction", "lodging"],
         });
 
         if (locationBias) {
@@ -1587,7 +1741,7 @@ function GoogleAutocompleteInput({
               bounds.extend({ lat: location.lat() - 0.35, lng: location.lng() - 0.35 });
               bounds.extend({ lat: location.lat() + 0.35, lng: location.lng() + 0.35 });
               autocomplete.setBounds(bounds);
-              autocomplete.setOptions({ strictBounds: true });
+              autocomplete.setOptions({ strictBounds: false });
               setStatus(`Buscando cerca de ${locationBias}. Elige un resultado para revisarlo.`);
             }
           });
@@ -1919,6 +2073,36 @@ function escapeHtml(value: string): string {
 
 function categoryLabel(category: PlaceCategory): string {
   return placeCategories.find((item) => item.value === category)?.label ?? "Otro";
+}
+
+function categoryMarkerIcon(category: PlaceCategory): google.maps.Icon {
+  const fill = categoryColor(category);
+  const svg = encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+      <circle cx="18" cy="18" r="14" fill="${fill}" stroke="white" stroke-width="4"/>
+      <text x="18" y="23" text-anchor="middle" font-family="Arial" font-size="13" font-weight="900" fill="white">${categoryLabel(category).slice(0, 1)}</text>
+    </svg>`,
+  );
+
+  return {
+    url: `data:image/svg+xml;charset=UTF-8,${svg}`,
+    scaledSize: new google.maps.Size(36, 36),
+    anchor: new google.maps.Point(18, 18),
+  };
+}
+
+function categoryColor(category: PlaceCategory): string {
+  const colors: Record<PlaceCategory, string> = {
+    restaurant: "#f43f5e",
+    monument: "#f59e0b",
+    hotel: "#0ea5e9",
+    transport: "#334155",
+    shopping: "#d946ef",
+    nature: "#10b981",
+    other: "#6366f1",
+  };
+
+  return colors[category];
 }
 
 function getWorkspaceFirstDayId(workspace: TripWorkspace): string {
