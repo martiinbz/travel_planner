@@ -80,6 +80,11 @@ export type Trip = {
   notes: string[];
 };
 
+export type TripWorkspace = {
+  activeTripId: string;
+  trips: Trip[];
+};
+
 export type TripStats = {
   dayCount: number;
   placeCount: number;
