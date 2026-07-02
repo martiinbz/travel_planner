@@ -97,4 +97,22 @@ describe("google maps helpers", () => {
       tags: ["google", "restaurant"],
     });
   });
+
+  it("turns a Places API result into a draft without forcing a day", () => {
+    const draft = googlePlaceToPlaceInput({
+      place_id: "google-456",
+      name: "Café Central",
+      formatted_address: "Herrengasse 14, Viena",
+      types: ["cafe", "food"],
+      geometry: {
+        location: {
+          lat: () => 48.2102,
+          lng: () => 16.3653,
+        },
+      },
+    });
+
+    expect(draft?.dayId).toBeUndefined();
+    expect(draft?.category).toBe("restaurant");
+  });
 });

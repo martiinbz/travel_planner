@@ -22,7 +22,7 @@ export type PlaceDraftFromGoogle = {
   category: PlaceCategory;
   lat: number;
   lng: number;
-  dayId: string;
+  dayId?: string;
   googlePlaceId?: string;
   tags: string[];
 };
@@ -88,7 +88,7 @@ export function googleSearchUrl(place: Pick<Place, "address" | "name">): string 
 
 export function googlePlaceToPlaceInput(
   place: GooglePlaceLike,
-  dayId: string,
+  dayId?: string,
 ): PlaceDraftFromGoogle | null {
   const location = place.geometry?.location;
   const name = place.name?.trim();

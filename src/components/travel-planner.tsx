@@ -61,7 +61,7 @@ import {
 
 const STORAGE_KEY = "travel-planner-trip";
 const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-type PlannerTab = "ruta" | "sitios" | "add" | "reservas" | "checklist" | "notas";
+type PlannerTab = "ruta" | "sitios" | "reservas" | "checklist" | "notas";
 
 let googleMapsLoader: Promise<typeof google> | null = null;
 
@@ -107,6 +107,7 @@ export function TravelPlanner() {
   const [selectedDayId, setSelectedDayId] = useState(initialTrip.days[0]?.id ?? "");
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<PlaceCategory | "all">("all");
+  const [googleDraft, setGoogleDraft] = useState<PlaceDraftFromGoogle | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "local">("idle");
   const hasLoaded = useRef(false);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -252,7 +253,8 @@ export function TravelPlanner() {
   function addPlace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const dayId = String(data.get("dayId") || selectedDay?.id || "");
+    const dayId = String(data.get("dayId") || "");
+    const addToRoute = data.get("addToRoute") === "on" && Boolean(dayId);
     const name = String(data.get("name") || "").trim();
     const address = String(data.get("address") || "").trim();
 
@@ -269,20 +271,17 @@ export function TravelPlanner() {
       status: "idea",
       lat: fallbackCoords.lat,
       lng: fallbackCoords.lng,
-      dayId,
+      dayId: dayId || undefined,
       notes: String(data.get("notes") || ""),
-      estimatedCost: Number(data.get("estimatedCost") || 0),
-      tags: String(data.get("tags") || "")
-        .split(",")
-        .map((tag) => tag.trim())
-        .filter(Boolean),
+      estimatedCost: 0,
+      tags: [],
     };
 
     updateTrip((current) => ({
       ...current,
       places: [...current.places, place],
       days: current.days.map((day) =>
-        day.id === dayId
+        addToRoute && day.id === dayId
           ? { ...day, routeStopIds: [...day.routeStopIds, place.id] }
           : day,
       ),
@@ -290,28 +289,51 @@ export function TravelPlanner() {
     event.currentTarget.reset();
   }
 
-  function addGooglePlace(draft: PlaceDraftFromGoogle) {
+  function saveGooglePlace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!googleDraft) {
+      return;
+    }
+
+    const data = new FormData(event.currentTarget);
+    const dayId = String(data.get("dayId") || "");
+    const addToRoute = data.get("addToRoute") === "on" && Boolean(dayId);
     const place: Place = {
       id: crypto.randomUUID(),
-      name: draft.name,
-      address: draft.address,
-      category: draft.category,
+      name: googleDraft.name,
+      address: googleDraft.address,
+      category: String(data.get("category") || googleDraft.category) as PlaceCategory,
       status: "idea",
-      lat: draft.lat,
-      lng: draft.lng,
-      dayId: draft.dayId,
-      googlePlaceId: draft.googlePlaceId,
-      notes: "Añadido desde Google Maps.",
+      lat: googleDraft.lat,
+      lng: googleDraft.lng,
+      dayId: dayId || undefined,
+      googlePlaceId: googleDraft.googlePlaceId,
+      notes: String(data.get("notes") || "Añadido desde Google Maps."),
       estimatedCost: 0,
-      tags: draft.tags,
+      tags: googleDraft.tags,
     };
 
     updateTrip((current) => ({
       ...current,
       places: [...current.places, place],
       days: current.days.map((day) =>
-        day.id === draft.dayId
+        addToRoute && day.id === dayId
           ? { ...day, routeStopIds: [...day.routeStopIds, place.id] }
+          : day,
+      ),
+    }));
+    setGoogleDraft(null);
+  }
+
+  function addPlaceToDayRoute(placeId: string, dayId: string) {
+    updateTrip((current) => ({
+      ...current,
+      places: current.places.map((place) =>
+        place.id === placeId ? { ...place, dayId } : place,
+      ),
+      days: current.days.map((day) =>
+        day.id === dayId && !day.routeStopIds.includes(placeId)
+          ? { ...day, routeStopIds: [...day.routeStopIds, placeId] }
           : day,
       ),
     }));
@@ -484,7 +506,7 @@ export function TravelPlanner() {
 
   return (
     <main className="min-h-screen bg-[#eef2ec] text-slate-950">
-      <div className="mx-auto flex max-w-[1500px] flex-col gap-6 px-4 py-4 sm:px-6 lg:px-8">
+      <div className="mx-auto flex max-w-[1400px] flex-col gap-4 px-3 py-3 sm:px-6 lg:px-8">
         <header className="grid gap-4 rounded-md border border-white/80 bg-white/85 p-4 shadow-sm backdrop-blur lg:grid-cols-[1fr_auto]">
           <div>
             <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-emerald-800">
@@ -508,7 +530,7 @@ export function TravelPlanner() {
               {formatDate(trip.endDate)}
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
             <button className="button-secondary" onClick={() => setShowDashboard(true)}>
               <LayoutDashboard size={18} />
               Todos los viajes
@@ -538,7 +560,7 @@ export function TravelPlanner() {
           </div>
         </header>
 
-        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
           <Stat icon={CalendarDays} label="Días" value={stats.dayCount} />
           <Stat icon={MapPin} label="Sitios" value={stats.placeCount} />
           <Stat icon={Save} label="Reservas" value={stats.bookedReservations} />
@@ -557,27 +579,31 @@ export function TravelPlanner() {
         <PlannerTabs activeTab={activeTab} setActiveTab={setActiveTab} />
 
         {activeTab === "sitios" ? (
-          <PlacesByCategoryPanel
-            categoryFilter={categoryFilter}
-            places={visiblePlaces}
-            query={query}
-            setCategoryFilter={setCategoryFilter}
-            setQuery={setQuery}
-            updatePlaceStatus={updatePlaceStatus}
-            removePlace={removePlace}
-          />
-        ) : null}
-
-        {activeTab === "add" ? (
-          <PlaceForm
-            addPlace={addPlace}
-            apiKey={GOOGLE_MAPS_API_KEY}
-            days={trip.days}
-            onAddGooglePlace={addGooglePlace}
-            selectedDay={selectedDay}
-            selectedDayId={selectedDay?.id ?? ""}
-            tripDestination={trip.destination}
-          />
+          <section className="grid gap-4">
+            <PlaceForm
+              addPlace={addPlace}
+              apiKey={GOOGLE_MAPS_API_KEY}
+              days={trip.days}
+              googleDraft={googleDraft}
+              onCancelGoogleDraft={() => setGoogleDraft(null)}
+              onSelectGoogleDraft={setGoogleDraft}
+              saveGooglePlace={saveGooglePlace}
+              selectedDay={selectedDay}
+              tripDestination={trip.destination}
+            />
+            <PlacesByCategoryPanel
+              addPlaceToDayRoute={addPlaceToDayRoute}
+              categoryFilter={categoryFilter}
+              days={trip.days}
+              places={visiblePlaces}
+              query={query}
+              selectedDayId={selectedDay?.id ?? ""}
+              setCategoryFilter={setCategoryFilter}
+              setQuery={setQuery}
+              updatePlaceStatus={updatePlaceStatus}
+              removePlace={removePlace}
+            />
+          </section>
         ) : null}
 
         {activeTab === "reservas" ? (
@@ -607,9 +633,7 @@ export function TravelPlanner() {
               dayPlaces={dayPlaces}
               embedUrl={embedUrl}
               mapsUrl={mapsUrl}
-              onAddGooglePlace={addGooglePlace}
               route={route}
-              selectedDayId={selectedDay?.id ?? ""}
               selectedDayTitle={selectedDay?.title ?? "Sin día"}
               visiblePlaces={visiblePlaces}
             />
@@ -641,10 +665,10 @@ function Stat({
   value: string | number;
 }) {
   return (
-    <div className="rounded-md border border-white/70 bg-white p-4 shadow-sm">
+    <div className="rounded-md border border-white/70 bg-white p-3 shadow-sm sm:p-4">
       <Icon className="text-emerald-700" size={20} />
-      <p className="mt-4 text-sm font-semibold text-slate-500">{label}</p>
-      <p className="mt-1 text-2xl font-black">{value}</p>
+      <p className="mt-3 text-xs font-semibold text-slate-500 sm:text-sm">{label}</p>
+      <p className="mt-1 text-xl font-black sm:text-2xl">{value}</p>
     </div>
   );
 }
@@ -776,22 +800,21 @@ function PlannerTabs({
 }) {
   const tabs: { id: PlannerTab; label: string; icon: typeof Route }[] = [
     { id: "ruta", label: "Ruta diaria", icon: Route },
-    { id: "sitios", label: "Sitios", icon: MapPin },
-    { id: "add", label: "Añadir sitio", icon: Plus },
+    { id: "sitios", label: "Añadir y sitios", icon: MapPin },
     { id: "reservas", label: "Reservas", icon: Plane },
     { id: "checklist", label: "Checklist", icon: ListChecks },
     { id: "notas", label: "Notas", icon: NotebookPen },
   ];
 
   return (
-    <nav className="flex gap-2 overflow-x-auto rounded-md border border-white/80 bg-white p-2 shadow-sm">
+    <nav className="grid grid-cols-2 gap-2 rounded-md border border-white/80 bg-white p-2 shadow-sm sm:flex sm:overflow-x-auto">
       {tabs.map((tab) => {
         const Icon = tab.icon;
         return (
           <button
             key={tab.id}
             className={cn(
-              "inline-flex min-w-fit items-center gap-2 rounded-md px-3 py-2 text-sm font-black transition",
+              "inline-flex min-w-fit items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-black transition",
               activeTab === tab.id
                 ? "bg-slate-950 text-white"
                 : "text-slate-600 hover:bg-slate-100",
@@ -808,22 +831,29 @@ function PlannerTabs({
 }
 
 function PlacesByCategoryPanel({
+  addPlaceToDayRoute,
   categoryFilter,
+  days,
   places,
   query,
   removePlace,
+  selectedDayId,
   setCategoryFilter,
   setQuery,
   updatePlaceStatus,
 }: {
+  addPlaceToDayRoute: (placeId: string, dayId: string) => void;
   categoryFilter: PlaceCategory | "all";
+  days: Trip["days"];
   places: Place[];
   query: string;
   removePlace: (placeId: string) => void;
+  selectedDayId: string;
   setCategoryFilter: (category: PlaceCategory | "all") => void;
   setQuery: (query: string) => void;
   updatePlaceStatus: (placeId: string, status: PlaceStatus) => void;
 }) {
+  const selectedDay = days.find((day) => day.id === selectedDayId);
   const grouped = placeCategories
     .map((category) => ({
       ...category,
@@ -881,6 +911,11 @@ function PlacesByCategoryPanel({
                       <div>
                         <p className="font-black">{place.name}</p>
                         <p className="text-sm text-slate-500">{place.address || "Sin dirección"}</p>
+                        <p className="mt-1 text-xs font-bold text-slate-400">
+                          {place.dayId
+                            ? days.find((day) => day.id === place.dayId)?.title ?? "Con día"
+                            : "Sin día asignado"}
+                        </p>
                       </div>
                       <button className="icon-button-danger" onClick={() => removePlace(place.id)}>
                         <Trash2 size={16} />
@@ -902,6 +937,21 @@ function PlacesByCategoryPanel({
                         </button>
                       ))}
                     </div>
+                    {selectedDay ? (
+                      <button
+                        className={cn(
+                          "mt-3 w-full rounded-md border px-3 py-2 text-sm font-black transition",
+                          place.dayId === selectedDay.id
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                            : "border-slate-200 bg-white text-slate-700 hover:border-emerald-400",
+                        )}
+                        onClick={() => addPlaceToDayRoute(place.id, selectedDay.id)}
+                      >
+                        {place.dayId === selectedDay.id
+                          ? `En ruta: ${selectedDay.title}`
+                          : `Añadir a ruta: ${selectedDay.title}`}
+                      </button>
+                    ) : null}
                   </article>
                 ))}
               </div>
@@ -922,9 +972,7 @@ function MapPanel({
   dayPlaces,
   embedUrl,
   mapsUrl,
-  onAddGooglePlace,
   route,
-  selectedDayId,
   selectedDayTitle,
   visiblePlaces,
 }: {
@@ -932,9 +980,7 @@ function MapPanel({
   dayPlaces: Place[];
   embedUrl: string | null;
   mapsUrl: string;
-  onAddGooglePlace: (place: PlaceDraftFromGoogle) => void;
   route: { distanceKm: number; durationMinutes: number };
-  selectedDayId: string;
   selectedDayTitle: string;
   visiblePlaces: Place[];
 }) {
@@ -951,15 +997,13 @@ function MapPanel({
         </a>
       </div>
       <div className="mt-4 grid items-stretch gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <div className="relative min-h-[520px] overflow-hidden rounded-md border border-slate-200 bg-[#dce8dc]">
+        <div className="relative min-h-[360px] overflow-hidden rounded-md border border-slate-200 bg-[#dce8dc] sm:min-h-[460px] lg:min-h-[520px]">
           {apiKey ? (
             <GoogleInteractiveMap
               apiKey={apiKey}
               embedUrl={embedUrl}
-              onAddGooglePlace={onAddGooglePlace}
               places={visiblePlaces}
               routePlaces={dayPlaces}
-              selectedDayId={selectedDayId}
             />
           ) : (
             <FallbackMap places={visiblePlaces} routePlaces={dayPlaces} />
@@ -995,20 +1039,15 @@ function MapPanel({
 function GoogleInteractiveMap({
   apiKey,
   embedUrl,
-  onAddGooglePlace,
   places,
   routePlaces,
-  selectedDayId,
 }: {
   apiKey: string;
   embedUrl: string | null;
-  onAddGooglePlace: (place: PlaceDraftFromGoogle) => void;
   places: Place[];
   routePlaces: Place[];
-  selectedDayId: string;
 }) {
   const mapNodeRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const markersRef = useRef<google.maps.Marker[]>([]);
   const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
@@ -1022,7 +1061,7 @@ function GoogleInteractiveMap({
       .then(() => {
         if (!cancelled) {
           setIsReady(true);
-          setStatus("Busca en Google y añade sitios al día seleccionado.");
+          setStatus("Mapa listo. Añade sitios desde Añadir y sitios.");
         }
       })
       .catch(() => {
@@ -1057,29 +1096,6 @@ function GoogleInteractiveMap({
       },
     });
   }, [isReady, routePlaces]);
-
-  useEffect(() => {
-    if (!isReady || !mapRef.current || !inputRef.current) {
-      return;
-    }
-
-    const searchBox = new google.maps.places.SearchBox(inputRef.current);
-    const listener = searchBox.addListener("places_changed", () => {
-      const place = searchBox.getPlaces()?.[0];
-      const draft = place ? googlePlaceToPlaceInput(place, selectedDayId) : null;
-
-      if (!draft) {
-        setStatus("El resultado no trae coordenadas suficientes.");
-        return;
-      }
-
-      onAddGooglePlace(draft);
-      setStatus(`${draft.name} añadido a la ruta.`);
-      inputRef.current!.value = "";
-    });
-
-    return () => listener.remove();
-  }, [isReady, onAddGooglePlace, selectedDayId]);
 
   useEffect(() => {
     if (!isReady || !mapRef.current || !directionsRendererRef.current) {
@@ -1153,17 +1169,8 @@ function GoogleInteractiveMap({
 
   return (
     <div className="absolute inset-0">
-      <div ref={mapNodeRef} className="h-full min-h-[520px] w-full" />
-      <div className="absolute left-3 right-3 top-3 grid gap-2 sm:left-4 sm:right-auto sm:w-[390px]">
-        <label className="relative block">
-          <Search className="absolute left-3 top-3 text-slate-400" size={17} />
-          <input
-            ref={inputRef}
-            className="input bg-white/95 pl-10 shadow-lg"
-            placeholder="Buscar en Google Maps y añadir"
-            type="search"
-          />
-        </label>
+      <div ref={mapNodeRef} className="h-full min-h-[360px] w-full sm:min-h-[460px] lg:min-h-[520px]" />
+      <div className="absolute left-3 right-3 top-3 sm:left-4 sm:right-auto sm:max-w-sm">
         <p className="rounded-md bg-white/95 px-3 py-2 text-xs font-semibold text-slate-600 shadow">
           {status}
         </p>
@@ -1423,47 +1430,88 @@ function PlaceForm({
   addPlace,
   apiKey,
   days,
-  onAddGooglePlace,
+  googleDraft,
+  onCancelGoogleDraft,
+  onSelectGoogleDraft,
+  saveGooglePlace,
   selectedDay,
-  selectedDayId,
   tripDestination,
 }: {
   addPlace: (event: FormEvent<HTMLFormElement>) => void;
   apiKey?: string;
   days: Trip["days"];
-  onAddGooglePlace: (place: PlaceDraftFromGoogle) => void;
+  googleDraft: PlaceDraftFromGoogle | null;
+  onCancelGoogleDraft: () => void;
+  onSelectGoogleDraft: (place: PlaceDraftFromGoogle) => void;
+  saveGooglePlace: (event: FormEvent<HTMLFormElement>) => void;
   selectedDay?: TripDay;
-  selectedDayId: string;
   tripDestination: string;
 }) {
   return (
-    <section className="grid gap-4 lg:grid-cols-[1fr_420px]">
-      <div className="rounded-md border border-white/70 bg-white p-4 shadow-sm">
-        <p className="text-sm font-semibold text-emerald-700">Añadir sitio</p>
-        <h2 className="text-2xl font-black">Buscar o guardar una idea</h2>
-        <p className="mt-2 text-sm text-slate-600">
-          Google prioriza {selectedDay?.city || tripDestination}. Si solo queréis guardar una idea,
-          poned el nombre y listo.
-        </p>
+    <section className="rounded-md border border-white/70 bg-white p-4 shadow-sm">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+        <div>
+          <p className="text-sm font-semibold text-emerald-700">Añadir primero</p>
+          <h2 className="text-2xl font-black">Busca en Google o guarda una idea</h2>
+          <p className="mt-2 text-sm text-slate-600">
+            La búsqueda se orienta a {selectedDay?.city || tripDestination}. Después eliges
+            categoría, día y si entra en ruta.
+          </p>
 
-        <div className="mt-5 rounded-md border border-emerald-100 bg-emerald-50 p-3">
-          <p className="mb-2 text-sm font-black text-emerald-900">Autocomplete de Google Maps</p>
-          <GoogleAutocompleteInput
-            apiKey={apiKey}
-            dayId={selectedDayId}
-            locationBias={selectedDay?.city || tripDestination}
-            onAddGooglePlace={onAddGooglePlace}
-          />
+          <div className="mt-4 rounded-md border border-emerald-100 bg-emerald-50 p-3">
+            <p className="mb-2 text-sm font-black text-emerald-900">Buscar con Google Maps</p>
+            <GoogleAutocompleteInput
+              apiKey={apiKey}
+              locationBias={selectedDay?.city || tripDestination}
+              onSelectGoogleDraft={onSelectGoogleDraft}
+            />
+          </div>
+
+          {googleDraft ? (
+            <form className="mt-4 rounded-md border border-slate-200 bg-white p-3" onSubmit={saveGooglePlace}>
+              <p className="text-xs font-black uppercase text-emerald-700">Resultado seleccionado</p>
+              <h3 className="mt-1 text-xl font-black">{googleDraft.name}</h3>
+              <p className="text-sm text-slate-500">{googleDraft.address}</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <select className="input" name="category" defaultValue={googleDraft.category}>
+                  {placeCategories.map((category) => (
+                    <option key={category.value} value={category.value}>
+                      {category.label}
+                    </option>
+                  ))}
+                </select>
+                <select className="input" name="dayId" defaultValue="">
+                  <option value="">Sin día todavía</option>
+                  {days.map((day) => (
+                    <option key={day.id} value={day.id}>
+                      {formatShortDate(day.date)} · {day.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <label className="mt-3 flex items-center gap-2 rounded-md bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">
+                <input name="addToRoute" type="checkbox" />
+                Añadir también a la ruta del día elegido
+              </label>
+              <textarea className="input mt-3 min-h-20 py-3" name="notes" placeholder="Notas opcionales" />
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <button className="button-primary justify-center" type="submit">
+                  Guardar sitio
+                </button>
+                <button className="button-secondary justify-center" type="button" onClick={onCancelGoogleDraft}>
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          ) : null}
         </div>
-      </div>
 
-      <form className="rounded-md border border-white/70 bg-white p-4 shadow-sm" onSubmit={addPlace}>
-        <p className="text-sm font-semibold text-emerald-700">Entrada manual</p>
-        <h3 className="text-xl font-black">Guardar por nombre</h3>
-        <div className="mt-4 grid gap-3">
-          <input className="input" name="name" placeholder="Nombre del sitio" required />
-          <input className="input" name="address" placeholder="Dirección o zona (opcional)" />
-          <div className="grid grid-cols-2 gap-3">
+        <form className="rounded-md border border-slate-200 bg-slate-50 p-3" onSubmit={addPlace}>
+          <p className="text-sm font-semibold text-emerald-700">Entrada manual</p>
+          <h3 className="text-xl font-black">Guardar por nombre</h3>
+          <div className="mt-4 grid gap-3">
+            <input className="input" name="name" placeholder="Nombre del sitio" required />
+            <input className="input" name="address" placeholder="Dirección o zona (opcional)" />
             <select className="input" name="category" defaultValue="other">
               {placeCategories.map((category) => (
                 <option key={category.value} value={category.value}>
@@ -1471,35 +1519,38 @@ function PlaceForm({
                 </option>
               ))}
             </select>
-            <select className="input" name="dayId" defaultValue={selectedDayId}>
+            <select className="input" name="dayId" defaultValue="">
+              <option value="">Sin día todavía</option>
               {days.map((day) => (
                 <option key={day.id} value={day.id}>
-                  {formatShortDate(day.date)}
+                  {formatShortDate(day.date)} · {day.title}
                 </option>
               ))}
             </select>
+            <label className="flex items-center gap-2 rounded-md bg-white px-3 py-2 text-sm font-bold text-slate-700">
+              <input name="addToRoute" type="checkbox" />
+              Añadir también a la ruta del día elegido
+            </label>
+            <textarea className="input min-h-24 py-3" name="notes" placeholder="Notas opcionales" />
+            <button className="button-primary justify-center" type="submit">
+              <Plus size={18} />
+              Añadir sitio
+            </button>
           </div>
-          <textarea className="input min-h-24 py-3" name="notes" placeholder="Notas opcionales" />
-          <button className="button-primary justify-center" type="submit">
-            <Plus size={18} />
-            Añadir sitio
-          </button>
-        </div>
-      </form>
+        </form>
+      </div>
     </section>
   );
 }
 
 function GoogleAutocompleteInput({
   apiKey,
-  dayId,
   locationBias,
-  onAddGooglePlace,
+  onSelectGoogleDraft,
 }: {
   apiKey?: string;
-  dayId: string;
   locationBias: string;
-  onAddGooglePlace: (place: PlaceDraftFromGoogle) => void;
+  onSelectGoogleDraft: (place: PlaceDraftFromGoogle) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState(
@@ -1524,6 +1575,7 @@ function GoogleAutocompleteInput({
 
         autocomplete = new google.maps.places.Autocomplete(inputRef.current, {
           fields: ["formatted_address", "geometry", "name", "place_id", "types", "vicinity"],
+          types: ["establishment", "tourist_attraction", "lodging"],
         });
 
         if (locationBias) {
@@ -1532,25 +1584,26 @@ function GoogleAutocompleteInput({
             const location = results?.[0]?.geometry.location;
             if (geocodeStatus === "OK" && location && autocomplete) {
               const bounds = new google.maps.LatLngBounds();
-              bounds.extend({ lat: location.lat() - 0.18, lng: location.lng() - 0.18 });
-              bounds.extend({ lat: location.lat() + 0.18, lng: location.lng() + 0.18 });
+              bounds.extend({ lat: location.lat() - 0.35, lng: location.lng() - 0.35 });
+              bounds.extend({ lat: location.lat() + 0.35, lng: location.lng() + 0.35 });
               autocomplete.setBounds(bounds);
-              autocomplete.setOptions({ strictBounds: false });
+              autocomplete.setOptions({ strictBounds: true });
+              setStatus(`Buscando cerca de ${locationBias}. Elige un resultado para revisarlo.`);
             }
           });
         }
 
         listener = autocomplete.addListener("place_changed", () => {
           const place = autocomplete?.getPlace();
-          const draft = place ? googlePlaceToPlaceInput(place, dayId) : null;
+          const draft = place ? googlePlaceToPlaceInput(place) : null;
 
           if (!draft) {
             setStatus("Ese resultado no trae coordenadas. Prueba otro o usa entrada manual.");
             return;
           }
 
-          onAddGooglePlace(draft);
-          setStatus(`${draft.name} añadido a la ruta.`);
+          onSelectGoogleDraft(draft);
+          setStatus(`${draft.name} seleccionado. Revisa categoría y día antes de guardar.`);
           if (inputRef.current) {
             inputRef.current.value = "";
           }
@@ -1559,7 +1612,7 @@ function GoogleAutocompleteInput({
       .catch(() => setStatus("No se pudo cargar Google Maps. Revisa la API key."));
 
     return () => listener?.remove();
-  }, [apiKey, dayId, locationBias, onAddGooglePlace]);
+  }, [apiKey, locationBias, onSelectGoogleDraft]);
 
   return (
     <div className="grid gap-2">
