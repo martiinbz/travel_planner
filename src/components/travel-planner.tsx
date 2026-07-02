@@ -976,6 +976,7 @@ function PlacesOverviewMap({ places }: { places: Place[] }) {
       Number.isFinite(place.lat) &&
       Number.isFinite(place.lng),
   );
+  const mapsUrl = buildGoogleMapsUrl(mappablePlaces);
 
   return (
     <div className="mt-4 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
@@ -989,6 +990,17 @@ function PlacesOverviewMap({ places }: { places: Place[] }) {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {mappablePlaces.length ? (
+            <a
+              className="inline-flex items-center gap-1 rounded-md bg-slate-950 px-2.5 py-1.5 text-xs font-black text-white transition hover:bg-emerald-800"
+              href={mapsUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <ExternalLink size={14} />
+              Abrir en Google Maps
+            </a>
+          ) : null}
           {placeCategories.map((category) => (
             <span key={category.value} className="inline-flex items-center gap-1 text-xs font-bold text-slate-500">
               <span className={cn("h-2.5 w-2.5 rounded-full", category.color)} />
@@ -1076,7 +1088,7 @@ function GooglePlacesOverviewMap({
         icon: categoryMarkerIcon(place.category),
       });
       const infoWindow = new google.maps.InfoWindow({
-        content: `<strong>${escapeHtml(place.name)}</strong><br>${escapeHtml(categoryLabel(place.category))}<br>${escapeHtml(place.address)}`,
+        content: `<a href="${escapeHtml(googleSearchUrl(place))}" target="_blank" rel="noopener noreferrer" style="font-weight:800;color:#047857;text-decoration:none">${escapeHtml(place.name)}</a><br>${escapeHtml(categoryLabel(place.category))}<br>${escapeHtml(place.address)}`,
       });
       marker.addListener("click", () => infoWindow.open({ map: mapRef.current, anchor: marker }));
       return marker;
@@ -1112,9 +1124,14 @@ function FallbackPlacesOverviewMap({ places }: { places: Place[] }) {
             style={{ left: `${position.x}%`, top: `${position.y}%` }}
             title={place.name}
           >
-            <div className={cn("grid h-8 w-8 place-items-center rounded-full text-xs font-black text-white ring-4 ring-white", category?.color)}>
+            <a
+              className={cn("grid h-8 w-8 place-items-center rounded-full text-xs font-black text-white ring-4 ring-white", category?.color)}
+              href={googleSearchUrl(place)}
+              target="_blank"
+              rel="noreferrer"
+            >
               {categoryLabel(place.category).slice(0, 1)}
-            </div>
+            </a>
           </div>
         );
       })}
