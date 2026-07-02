@@ -7,7 +7,9 @@ import {
 } from "@/lib/auth";
 import { createServerSupabaseClient } from "@/lib/supabase";
 import { getTripSyncConfig } from "@/lib/trip-sync";
-import type { Trip } from "@/lib/types";
+import { initialTrip } from "@/lib/sample-data";
+import type { Trip, TripWorkspace } from "@/lib/types";
+import { normalizeWorkspace } from "@/lib/workspace";
 
 const TRIP_ROW_ID = "main";
 
@@ -21,7 +23,7 @@ export async function GET(request: NextRequest) {
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
   });
   if (syncConfig.mode === "local") {
-    return NextResponse.json({ mode: "local", trip: null });
+    return NextResponse.json({ mode: "local", workspace: null });
   }
 
   const supabase = createServerSupabaseClient();
@@ -35,7 +37,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ mode: "server", trip: data?.data ?? null });
+  return NextResponse.json({
+    mode: "server",
+    workspace: data?.data ? normalizeWorkspace(data.data, initialTrip) : null,
+  });
 }
 
 export async function PUT(request: NextRequest) {
@@ -43,9 +48,13 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = (await request.json()) as { trip?: Trip };
-  if (!body.trip?.id) {
-    return NextResponse.json({ error: "Invalid trip payload" }, { status: 400 });
+  const body = (await request.json()) as {
+    trip?: Trip;
+    workspace?: TripWorkspace;
+  };
+  const workspace = body.workspace ?? (body.trip ? normalizeWorkspace(body.trip, initialTrip) : null);
+  if (!workspace?.trips.length) {
+    return NextResponse.json({ error: "Invalid workspace payload" }, { status: 400 });
   }
 
   const syncConfig = getTripSyncConfig({
@@ -59,7 +68,7 @@ export async function PUT(request: NextRequest) {
   const supabase = createServerSupabaseClient();
   const { error } = await supabase!.from("travel_plans").upsert({
     id: TRIP_ROW_ID,
-    data: body.trip,
+    data: workspace,
   });
 
   if (error) {

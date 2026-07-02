@@ -9,20 +9,25 @@ import {
   Download,
   ExternalLink,
   FileText,
+  FolderKanban,
   Hotel,
+  LayoutDashboard,
+  ListChecks,
   MapPin,
   Navigation,
+  NotebookPen,
   Plus,
   Plane,
   Route,
   Save,
   Search,
   Sparkles,
+  StickyNote,
   Trash2,
   Upload,
   WalletCards,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { FormEvent, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { logoutAction } from "@/app/actions";
 import {
   buildGoogleEmbedUrl,
@@ -44,11 +49,19 @@ import type {
   ReservationStatus,
   ReservationType,
   Trip,
+  TripDay,
+  TripWorkspace,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  createTrip,
+  createWorkspaceFromTrip,
+  normalizeWorkspace,
+} from "@/lib/workspace";
 
 const STORAGE_KEY = "travel-planner-trip";
 const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+type PlannerTab = "ruta" | "sitios" | "add" | "reservas" | "checklist" | "notas";
 
 let googleMapsLoader: Promise<typeof google> | null = null;
 
@@ -86,36 +99,49 @@ const reservationStatuses: { value: ReservationStatus; label: string }[] = [
 ];
 
 export function TravelPlanner() {
-  const [trip, setTrip] = useState<Trip>(initialTrip);
+  const [workspace, setWorkspace] = useState<TripWorkspace>(() =>
+    createWorkspaceFromTrip(initialTrip),
+  );
+  const [showDashboard, setShowDashboard] = useState(true);
+  const [activeTab, setActiveTab] = useState<PlannerTab>("ruta");
   const [selectedDayId, setSelectedDayId] = useState(initialTrip.days[0]?.id ?? "");
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<PlaceCategory | "all">("all");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "local">("idle");
-  const [isPending, startTransition] = useTransition();
   const hasLoaded = useRef(false);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let mounted = true;
 
-    async function loadTrip() {
+    async function loadWorkspace() {
       const local = window.localStorage.getItem(STORAGE_KEY);
       if (local) {
-        setTrip(JSON.parse(local) as Trip);
+        const nextWorkspace = normalizeWorkspace(JSON.parse(local), initialTrip);
+        setWorkspace(nextWorkspace);
+        setSelectedDayId(getWorkspaceFirstDayId(nextWorkspace));
       }
 
       const response = await fetch("/api/trip", { credentials: "same-origin" });
       if (response.ok) {
-        const payload = (await response.json()) as { trip?: Trip | null };
-        if (mounted && payload.trip) {
-          setTrip(payload.trip);
+        const payload = (await response.json()) as {
+          trip?: Trip | null;
+          workspace?: TripWorkspace | null;
+        };
+        if (mounted && (payload.workspace || payload.trip)) {
+          const nextWorkspace = normalizeWorkspace(payload.workspace ?? payload.trip, initialTrip);
+          setWorkspace(nextWorkspace);
+          setSelectedDayId(getWorkspaceFirstDayId(nextWorkspace));
         }
       }
 
       hasLoaded.current = true;
     }
 
-    loadTrip();
+    loadWorkspace().catch(() => {
+      hasLoaded.current = true;
+      setSaveState("local");
+    });
 
     return () => {
       mounted = false;
@@ -127,7 +153,7 @@ export function TravelPlanner() {
       return;
     }
 
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(trip));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
     setSaveState("saving");
 
     const timeout = window.setTimeout(async () => {
@@ -135,7 +161,7 @@ export function TravelPlanner() {
         method: "PUT",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trip }),
+        body: JSON.stringify({ workspace }),
       });
 
       if (!response.ok) {
@@ -148,9 +174,14 @@ export function TravelPlanner() {
     }, 450);
 
     return () => window.clearTimeout(timeout);
-  }, [trip]);
+  }, [workspace]);
 
+  const trip =
+    workspace.trips.find((item) => item.id === workspace.activeTripId) ??
+    workspace.trips[0] ??
+    initialTrip;
   const selectedDay = trip.days.find((day) => day.id === selectedDayId) ?? trip.days[0];
+
   const dayPlaces = useMemo(
     () =>
       selectedDay
@@ -178,7 +209,44 @@ export function TravelPlanner() {
   );
 
   function updateTrip(updater: (draft: Trip) => Trip) {
-    setTrip((current) => updater(current));
+    setWorkspace((current) => ({
+      ...current,
+      trips: current.trips.map((item) =>
+        item.id === trip.id ? updater(item) : item,
+      ),
+    }));
+  }
+
+  function openTrip(tripId: string) {
+    const nextTrip = workspace.trips.find((item) => item.id === tripId);
+    if (!nextTrip) {
+      return;
+    }
+
+    setWorkspace((current) => ({ ...current, activeTripId: tripId }));
+    setSelectedDayId(nextTrip.days[0]?.id ?? "");
+    setActiveTab("ruta");
+    setShowDashboard(false);
+  }
+
+  function addTrip(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const newTrip = createTrip({
+      title: String(data.get("title") || "").trim(),
+      destination: String(data.get("destination") || "").trim(),
+      startDate: String(data.get("startDate") || ""),
+      endDate: String(data.get("endDate") || ""),
+    });
+
+    setWorkspace((current) => ({
+      activeTripId: newTrip.id,
+      trips: [newTrip, ...current.trips],
+    }));
+    setSelectedDayId(newTrip.days[0]?.id ?? "");
+    setActiveTab("ruta");
+    setShowDashboard(false);
+    event.currentTarget.reset();
   }
 
   function addPlace(event: FormEvent<HTMLFormElement>) {
@@ -188,18 +256,19 @@ export function TravelPlanner() {
     const name = String(data.get("name") || "").trim();
     const address = String(data.get("address") || "").trim();
 
-    if (!name || !address) {
+    if (!name) {
       return;
     }
 
+    const fallbackCoords = getDefaultCoordinates(dayPlaces, trip.places);
     const place: Place = {
       id: crypto.randomUUID(),
       name,
-      address,
-      category: String(data.get("category")) as PlaceCategory,
+      address: address || selectedDay?.city || trip.destination,
+      category: String(data.get("category") || "other") as PlaceCategory,
       status: "idea",
-      lat: Number(data.get("lat") || 41.9028),
-      lng: Number(data.get("lng") || 12.4964),
+      lat: fallbackCoords.lat,
+      lng: fallbackCoords.lng,
       dayId,
       notes: String(data.get("notes") || ""),
       estimatedCost: Number(data.get("estimatedCost") || 0),
@@ -371,13 +440,13 @@ export function TravelPlanner() {
   }
 
   function exportTrip() {
-    const blob = new Blob([JSON.stringify(trip, null, 2)], {
+    const blob = new Blob([JSON.stringify(workspace, null, 2)], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${trip.title.toLowerCase().replace(/\s+/g, "-")}.json`;
+    link.download = "viajes.json";
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -387,7 +456,30 @@ export function TravelPlanner() {
       return;
     }
     const text = await file.text();
-    setTrip(JSON.parse(text) as Trip);
+    const imported = normalizeWorkspace(JSON.parse(text), initialTrip);
+    const importedTrip =
+      imported.trips.find((item) => item.id === imported.activeTripId) ??
+      imported.trips[0];
+    setWorkspace(imported);
+    setSelectedDayId(importedTrip?.days[0]?.id ?? "");
+  }
+
+  if (showDashboard) {
+    return (
+      <main className="min-h-screen bg-[#eef2ec] text-slate-950">
+        <div className="mx-auto flex max-w-[1300px] flex-col gap-6 px-4 py-4 sm:px-6 lg:px-8">
+          <TripsDashboard
+            addTrip={addTrip}
+            importInputRef={importInputRef}
+            importTrip={importTrip}
+            onExport={exportTrip}
+            onOpenTrip={openTrip}
+            saveState={saveState}
+            trips={workspace.trips}
+          />
+        </div>
+      </main>
+    );
   }
 
   return (
@@ -417,6 +509,10 @@ export function TravelPlanner() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button className="button-secondary" onClick={() => setShowDashboard(true)}>
+              <LayoutDashboard size={18} />
+              Todos los viajes
+            </button>
             <button className="icon-button" onClick={exportTrip} title="Exportar JSON">
               <Download size={18} />
             </button>
@@ -458,7 +554,53 @@ export function TravelPlanner() {
           />
         </section>
 
-        <section className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(390px,0.65fr)]">
+        <PlannerTabs activeTab={activeTab} setActiveTab={setActiveTab} />
+
+        {activeTab === "sitios" ? (
+          <PlacesByCategoryPanel
+            categoryFilter={categoryFilter}
+            places={visiblePlaces}
+            query={query}
+            setCategoryFilter={setCategoryFilter}
+            setQuery={setQuery}
+            updatePlaceStatus={updatePlaceStatus}
+            removePlace={removePlace}
+          />
+        ) : null}
+
+        {activeTab === "add" ? (
+          <PlaceForm
+            addPlace={addPlace}
+            apiKey={GOOGLE_MAPS_API_KEY}
+            days={trip.days}
+            onAddGooglePlace={addGooglePlace}
+            selectedDay={selectedDay}
+            selectedDayId={selectedDay?.id ?? ""}
+            tripDestination={trip.destination}
+          />
+        ) : null}
+
+        {activeTab === "reservas" ? (
+          <ReservationsPanel
+            addReservation={addReservation}
+            days={trip.days}
+            reservations={trip.reservations}
+            currency={trip.currency}
+          />
+        ) : null}
+
+        {activeTab === "checklist" ? (
+          <ChecklistPanel
+            addChecklistItem={addChecklistItem}
+            checklist={trip.checklist}
+            toggleChecklist={toggleChecklist}
+          />
+        ) : null}
+
+        {activeTab === "notas" ? <NotesPanel addNote={addNote} notes={trip.notes} /> : null}
+
+        {activeTab === "ruta" ? (
+        <section className="grid gap-6">
           <div className="grid gap-6">
             <MapPanel
               apiKey={GOOGLE_MAPS_API_KEY}
@@ -482,31 +624,8 @@ export function TravelPlanner() {
             />
           </div>
 
-          <aside className="grid gap-6">
-            <PlaceForm
-              addPlace={addPlace}
-              categoryFilter={categoryFilter}
-              days={trip.days}
-              query={query}
-              selectedDayId={selectedDay?.id ?? ""}
-              setCategoryFilter={setCategoryFilter}
-              setQuery={setQuery}
-            />
-            <ReservationsPanel
-              addReservation={addReservation}
-              days={trip.days}
-              reservations={trip.reservations}
-              currency={trip.currency}
-            />
-            <ChecklistPanel
-              addChecklistItem={addChecklistItem}
-              checklist={trip.checklist}
-              toggleChecklist={toggleChecklist}
-            />
-            <NotesPanel addNote={addNote} notes={trip.notes} />
-            <SetupPanel isPending={isPending} startTransition={startTransition} />
-          </aside>
         </section>
+        ) : null}
       </div>
     </main>
   );
@@ -527,6 +646,274 @@ function Stat({
       <p className="mt-4 text-sm font-semibold text-slate-500">{label}</p>
       <p className="mt-1 text-2xl font-black">{value}</p>
     </div>
+  );
+}
+
+function TripsDashboard({
+  addTrip,
+  importInputRef,
+  importTrip,
+  onExport,
+  onOpenTrip,
+  saveState,
+  trips,
+}: {
+  addTrip: (event: FormEvent<HTMLFormElement>) => void;
+  importInputRef: RefObject<HTMLInputElement | null>;
+  importTrip: (file: File | undefined) => void;
+  onExport: () => void;
+  onOpenTrip: (tripId: string) => void;
+  saveState: "idle" | "saving" | "saved" | "local";
+  trips: Trip[];
+}) {
+  return (
+    <>
+      <header className="grid gap-4 rounded-md border border-white/80 bg-white/90 p-5 shadow-sm lg:grid-cols-[1fr_auto]">
+        <div>
+          <div className="inline-flex items-center gap-2 rounded-md bg-emerald-50 px-3 py-2 text-sm font-black text-emerald-800">
+            <FolderKanban size={18} />
+            Dashboard privado
+          </div>
+          <h1 className="mt-4 text-3xl font-black sm:text-5xl">Nuestros viajes</h1>
+          <p className="mt-2 max-w-2xl text-slate-600">
+            Un sitio para guardar escapadas, rutas diarias, reservas, sitios pendientes y notas.
+          </p>
+        </div>
+        <div className="flex flex-wrap content-start gap-2">
+          <span className="rounded-md bg-slate-100 px-3 py-2 text-sm font-bold text-slate-600">
+            {saveState === "saving"
+              ? "Guardando..."
+              : saveState === "saved"
+                ? "Sincronizado"
+                : saveState === "local"
+                  ? "Guardado local"
+                  : "Listo"}
+          </span>
+          <button className="icon-button" onClick={onExport} title="Exportar viajes">
+            <Download size={18} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={() => importInputRef.current?.click()}
+            title="Importar viajes"
+          >
+            <Upload size={18} />
+          </button>
+          <input
+            ref={importInputRef}
+            className="hidden"
+            type="file"
+            accept="application/json"
+            onChange={(event) => importTrip(event.target.files?.[0])}
+          />
+          <form action={logoutAction}>
+            <button className="button-secondary" type="submit">
+              Salir
+            </button>
+          </form>
+        </div>
+      </header>
+
+      <section className="grid gap-4 lg:grid-cols-[1fr_360px]">
+        <div className="grid gap-4 md:grid-cols-2">
+          {trips.map((trip) => {
+            const stats = calculateTripStats(trip);
+            return (
+              <article key={trip.id} className="rounded-md border border-white/80 bg-white p-4 shadow-sm">
+                <p className="text-sm font-black uppercase text-emerald-700">
+                  {trip.destination}
+                </p>
+                <h2 className="mt-2 text-2xl font-black">{trip.title}</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  {formatDate(trip.startDate)} - {formatDate(trip.endDate)}
+                </p>
+                <div className="mt-4 grid grid-cols-3 gap-2 text-sm">
+                  <span className="rounded-md bg-slate-50 p-2 font-bold">
+                    {stats.dayCount} días
+                  </span>
+                  <span className="rounded-md bg-slate-50 p-2 font-bold">
+                    {stats.placeCount} sitios
+                  </span>
+                  <span className="rounded-md bg-slate-50 p-2 font-bold">
+                    {stats.bookedReservations} reservas
+                  </span>
+                </div>
+                <button className="button-primary mt-4 w-full justify-center" onClick={() => onOpenTrip(trip.id)}>
+                  Abrir viaje
+                </button>
+              </article>
+            );
+          })}
+        </div>
+
+        <form className="rounded-md border border-emerald-100 bg-[#10251d] p-4 text-white shadow-sm" onSubmit={addTrip}>
+          <p className="text-sm font-black uppercase text-emerald-200">Nuevo viaje</p>
+          <h2 className="mt-2 text-2xl font-black">Crear escapada</h2>
+          <div className="mt-4 grid gap-3">
+            <input className="input text-slate-950" name="title" placeholder="Nombre: Viena en Navidad" required />
+            <input className="input text-slate-950" name="destination" placeholder="Ciudad o destino" required />
+            <div className="grid grid-cols-2 gap-3">
+              <input className="input text-slate-950" name="startDate" type="date" required />
+              <input className="input text-slate-950" name="endDate" type="date" required />
+            </div>
+            <button className="button-primary justify-center" type="submit">
+              <Plus size={18} />
+              Crear viaje
+            </button>
+          </div>
+        </form>
+      </section>
+    </>
+  );
+}
+
+function PlannerTabs({
+  activeTab,
+  setActiveTab,
+}: {
+  activeTab: PlannerTab;
+  setActiveTab: (tab: PlannerTab) => void;
+}) {
+  const tabs: { id: PlannerTab; label: string; icon: typeof Route }[] = [
+    { id: "ruta", label: "Ruta diaria", icon: Route },
+    { id: "sitios", label: "Sitios", icon: MapPin },
+    { id: "add", label: "Añadir sitio", icon: Plus },
+    { id: "reservas", label: "Reservas", icon: Plane },
+    { id: "checklist", label: "Checklist", icon: ListChecks },
+    { id: "notas", label: "Notas", icon: NotebookPen },
+  ];
+
+  return (
+    <nav className="flex gap-2 overflow-x-auto rounded-md border border-white/80 bg-white p-2 shadow-sm">
+      {tabs.map((tab) => {
+        const Icon = tab.icon;
+        return (
+          <button
+            key={tab.id}
+            className={cn(
+              "inline-flex min-w-fit items-center gap-2 rounded-md px-3 py-2 text-sm font-black transition",
+              activeTab === tab.id
+                ? "bg-slate-950 text-white"
+                : "text-slate-600 hover:bg-slate-100",
+            )}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            <Icon size={17} />
+            {tab.label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function PlacesByCategoryPanel({
+  categoryFilter,
+  places,
+  query,
+  removePlace,
+  setCategoryFilter,
+  setQuery,
+  updatePlaceStatus,
+}: {
+  categoryFilter: PlaceCategory | "all";
+  places: Place[];
+  query: string;
+  removePlace: (placeId: string) => void;
+  setCategoryFilter: (category: PlaceCategory | "all") => void;
+  setQuery: (query: string) => void;
+  updatePlaceStatus: (placeId: string, status: PlaceStatus) => void;
+}) {
+  const grouped = placeCategories
+    .map((category) => ({
+      ...category,
+      places: places.filter((place) => place.category === category.value),
+    }))
+    .filter((category) => category.places.length);
+
+  return (
+    <section className="rounded-md border border-white/70 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-emerald-700">Sitios guardados</p>
+          <h2 className="text-2xl font-black">Agrupados por categoría</h2>
+        </div>
+        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-[260px_190px]">
+          <label className="relative">
+            <Search className="absolute left-3 top-3 text-slate-400" size={17} />
+            <input
+              className="input pl-10"
+              placeholder="Filtrar sitios"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <select
+            className="input"
+            value={categoryFilter}
+            onChange={(event) => setCategoryFilter(event.target.value as PlaceCategory | "all")}
+          >
+            <option value="all">Todas</option>
+            {placeCategories.map((category) => (
+              <option key={category.value} value={category.value}>
+                {category.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4">
+        {grouped.length ? (
+          grouped.map((group) => (
+            <div key={group.value} className="rounded-md border border-slate-200 p-3">
+              <div className="mb-3 flex items-center gap-2">
+                <span className={cn("h-3 w-3 rounded-full", group.color)} />
+                <h3 className="font-black">{group.label}</h3>
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500">
+                  {group.places.length}
+                </span>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                {group.places.map((place) => (
+                  <article key={place.id} className="rounded-md bg-slate-50 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-black">{place.name}</p>
+                        <p className="text-sm text-slate-500">{place.address || "Sin dirección"}</p>
+                      </div>
+                      <button className="icon-button-danger" onClick={() => removePlace(place.id)}>
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {(Object.keys(statusLabels) as PlaceStatus[]).map((status) => (
+                        <button
+                          key={status}
+                          className={cn(
+                            "rounded-md border px-2 py-1 text-xs font-bold",
+                            place.status === status
+                              ? "border-slate-950 bg-slate-950 text-white"
+                              : "border-slate-200 bg-white text-slate-600",
+                          )}
+                          onClick={() => updatePlaceStatus(place.id, status)}
+                        >
+                          {statusLabels[status]}
+                        </button>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="rounded-md border border-dashed border-slate-300 p-8 text-center text-slate-500">
+            No hay sitios con esos filtros.
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -563,8 +950,8 @@ function MapPanel({
           Google Maps
         </a>
       </div>
-      <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_270px]">
-        <div className="relative min-h-[430px] overflow-hidden rounded-md border border-slate-200 bg-[#dce8dc]">
+      <div className="mt-4 grid items-stretch gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="relative min-h-[520px] overflow-hidden rounded-md border border-slate-200 bg-[#dce8dc]">
           {apiKey ? (
             <GoogleInteractiveMap
               apiKey={apiKey}
@@ -578,7 +965,7 @@ function MapPanel({
             <FallbackMap places={visiblePlaces} routePlaces={dayPlaces} />
           )}
         </div>
-        <div className="grid content-start gap-3">
+        <div className="grid max-h-[520px] content-start gap-3 overflow-auto pr-1">
           <div className="rounded-md bg-slate-950 p-4 text-white">
             <Route size={22} />
             <p className="mt-3 text-sm text-slate-300">Estimación a pie</p>
@@ -701,13 +1088,20 @@ function GoogleInteractiveMap({
 
     markersRef.current.forEach((marker) => marker.setMap(null));
     markersRef.current = places.map((place) => {
+      const routeIndex = routePlaces.findIndex((routePlace) => routePlace.id === place.id);
       const marker = new google.maps.Marker({
         map: mapRef.current,
         position: { lat: place.lat, lng: place.lng },
         title: place.name,
-        label: routePlaces.some((routePlace) => routePlace.id === place.id)
-          ? String(routePlaces.findIndex((routePlace) => routePlace.id === place.id) + 1)
-          : undefined,
+        label:
+          routeIndex >= 0
+            ? {
+                text: String(routeIndex + 1),
+                color: "#ffffff",
+                fontWeight: "900",
+              }
+            : undefined,
+        zIndex: routeIndex >= 0 ? 1000 + routeIndex : undefined,
       });
 
       const infoWindow = new google.maps.InfoWindow({
@@ -759,7 +1153,7 @@ function GoogleInteractiveMap({
 
   return (
     <div className="absolute inset-0">
-      <div ref={mapNodeRef} className="h-full min-h-[430px] w-full" />
+      <div ref={mapNodeRef} className="h-full min-h-[520px] w-full" />
       <div className="absolute left-3 right-3 top-3 grid gap-2 sm:left-4 sm:right-auto sm:w-[390px]">
         <label className="relative block">
           <Search className="absolute left-3 top-3 text-slate-400" size={17} />
@@ -819,6 +1213,7 @@ function FallbackMap({
       </svg>
       {points.map(({ place, position }) => {
         const category = placeCategories.find((item) => item.value === place.category);
+        const routeIndex = routePlaces.findIndex((routePlace) => routePlace.id === place.id);
         return (
           <div
             key={place.id}
@@ -826,7 +1221,15 @@ function FallbackMap({
             style={{ left: `${position.x}%`, top: `${position.y}%` }}
             title={place.name}
           >
-            <div className={cn("h-4 w-4 rounded-full ring-4 ring-white", category?.color)} />
+            <div
+              className={cn(
+                "grid rounded-full text-[11px] font-black text-white ring-4 ring-white",
+                routeIndex >= 0 ? "h-7 w-7 place-items-center" : "h-4 w-4",
+                category?.color,
+              )}
+            >
+              {routeIndex >= 0 ? routeIndex + 1 : null}
+            </div>
           </div>
         );
       })}
@@ -926,7 +1329,8 @@ function PlannerPanel({
   );
 }
 
-function PlaceForm({
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function LegacyPlaceForm({
   addPlace,
   categoryFilter,
   days,
@@ -1012,6 +1416,165 @@ function PlaceForm({
         </div>
       </form>
     </section>
+  );
+}
+
+function PlaceForm({
+  addPlace,
+  apiKey,
+  days,
+  onAddGooglePlace,
+  selectedDay,
+  selectedDayId,
+  tripDestination,
+}: {
+  addPlace: (event: FormEvent<HTMLFormElement>) => void;
+  apiKey?: string;
+  days: Trip["days"];
+  onAddGooglePlace: (place: PlaceDraftFromGoogle) => void;
+  selectedDay?: TripDay;
+  selectedDayId: string;
+  tripDestination: string;
+}) {
+  return (
+    <section className="grid gap-4 lg:grid-cols-[1fr_420px]">
+      <div className="rounded-md border border-white/70 bg-white p-4 shadow-sm">
+        <p className="text-sm font-semibold text-emerald-700">Añadir sitio</p>
+        <h2 className="text-2xl font-black">Buscar o guardar una idea</h2>
+        <p className="mt-2 text-sm text-slate-600">
+          Google prioriza {selectedDay?.city || tripDestination}. Si solo queréis guardar una idea,
+          poned el nombre y listo.
+        </p>
+
+        <div className="mt-5 rounded-md border border-emerald-100 bg-emerald-50 p-3">
+          <p className="mb-2 text-sm font-black text-emerald-900">Autocomplete de Google Maps</p>
+          <GoogleAutocompleteInput
+            apiKey={apiKey}
+            dayId={selectedDayId}
+            locationBias={selectedDay?.city || tripDestination}
+            onAddGooglePlace={onAddGooglePlace}
+          />
+        </div>
+      </div>
+
+      <form className="rounded-md border border-white/70 bg-white p-4 shadow-sm" onSubmit={addPlace}>
+        <p className="text-sm font-semibold text-emerald-700">Entrada manual</p>
+        <h3 className="text-xl font-black">Guardar por nombre</h3>
+        <div className="mt-4 grid gap-3">
+          <input className="input" name="name" placeholder="Nombre del sitio" required />
+          <input className="input" name="address" placeholder="Dirección o zona (opcional)" />
+          <div className="grid grid-cols-2 gap-3">
+            <select className="input" name="category" defaultValue="other">
+              {placeCategories.map((category) => (
+                <option key={category.value} value={category.value}>
+                  {category.label}
+                </option>
+              ))}
+            </select>
+            <select className="input" name="dayId" defaultValue={selectedDayId}>
+              {days.map((day) => (
+                <option key={day.id} value={day.id}>
+                  {formatShortDate(day.date)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <textarea className="input min-h-24 py-3" name="notes" placeholder="Notas opcionales" />
+          <button className="button-primary justify-center" type="submit">
+            <Plus size={18} />
+            Añadir sitio
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function GoogleAutocompleteInput({
+  apiKey,
+  dayId,
+  locationBias,
+  onAddGooglePlace,
+}: {
+  apiKey?: string;
+  dayId: string;
+  locationBias: string;
+  onAddGooglePlace: (place: PlaceDraftFromGoogle) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [status, setStatus] = useState(
+    apiKey
+      ? "Escribe un sitio y elige un resultado."
+      : "Añade una API key de Google para activar autocomplete.",
+  );
+
+  useEffect(() => {
+    if (!apiKey || !inputRef.current) {
+      return;
+    }
+
+    let listener: google.maps.MapsEventListener | undefined;
+    let autocomplete: google.maps.places.Autocomplete | undefined;
+
+    loadGoogleMaps(apiKey)
+      .then(() => {
+        if (!inputRef.current) {
+          return;
+        }
+
+        autocomplete = new google.maps.places.Autocomplete(inputRef.current, {
+          fields: ["formatted_address", "geometry", "name", "place_id", "types", "vicinity"],
+        });
+
+        if (locationBias) {
+          const geocoder = new google.maps.Geocoder();
+          geocoder.geocode({ address: locationBias }, (results, geocodeStatus) => {
+            const location = results?.[0]?.geometry.location;
+            if (geocodeStatus === "OK" && location && autocomplete) {
+              const bounds = new google.maps.LatLngBounds();
+              bounds.extend({ lat: location.lat() - 0.18, lng: location.lng() - 0.18 });
+              bounds.extend({ lat: location.lat() + 0.18, lng: location.lng() + 0.18 });
+              autocomplete.setBounds(bounds);
+              autocomplete.setOptions({ strictBounds: false });
+            }
+          });
+        }
+
+        listener = autocomplete.addListener("place_changed", () => {
+          const place = autocomplete?.getPlace();
+          const draft = place ? googlePlaceToPlaceInput(place, dayId) : null;
+
+          if (!draft) {
+            setStatus("Ese resultado no trae coordenadas. Prueba otro o usa entrada manual.");
+            return;
+          }
+
+          onAddGooglePlace(draft);
+          setStatus(`${draft.name} añadido a la ruta.`);
+          if (inputRef.current) {
+            inputRef.current.value = "";
+          }
+        });
+      })
+      .catch(() => setStatus("No se pudo cargar Google Maps. Revisa la API key."));
+
+    return () => listener?.remove();
+  }, [apiKey, dayId, locationBias, onAddGooglePlace]);
+
+  return (
+    <div className="grid gap-2">
+      <label className="relative">
+        <Search className="absolute left-3 top-3 text-slate-400" size={17} />
+        <input
+          ref={inputRef}
+          className="input bg-white pl-10"
+          disabled={!apiKey}
+          placeholder={`Buscar cerca de ${locationBias || "la ciudad"}`}
+          type="search"
+        />
+      </label>
+      <p className="text-xs font-bold text-emerald-900">{status}</p>
+    </div>
   );
 }
 
@@ -1144,7 +1707,8 @@ function ChecklistPanel({
   );
 }
 
-function NotesPanel({
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function LegacyNotesPanel({
   addNote,
   notes,
 }: {
@@ -1172,6 +1736,65 @@ function NotesPanel({
   );
 }
 
+function NotesPanel({
+  addNote,
+  notes,
+}: {
+  addNote: (event: FormEvent<HTMLFormElement>) => void;
+  notes: string[];
+}) {
+  const noteStyles = [
+    "bg-amber-50 border-amber-200",
+    "bg-emerald-50 border-emerald-200",
+    "bg-sky-50 border-sky-200",
+    "bg-rose-50 border-rose-200",
+  ];
+
+  return (
+    <section className="rounded-md border border-white/70 bg-white p-4 shadow-sm">
+      <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
+        <form className="rounded-md bg-slate-950 p-4 text-white" onSubmit={addNote}>
+          <StickyNote size={22} />
+          <h2 className="mt-3 text-2xl font-black">Notas del viaje</h2>
+          <p className="mt-1 text-sm text-slate-300">
+            Ideas sueltas, dudas, planes B o restaurantes que mirar luego.
+          </p>
+          <textarea
+            className="input mt-4 min-h-28 py-3 text-slate-950"
+            name="note"
+            placeholder="Idea, duda o recordatorio"
+          />
+          <button className="button-primary mt-3 w-full justify-center" type="submit">
+            <Plus size={18} />
+            Añadir nota
+          </button>
+        </form>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {notes.map((note, index) => (
+            <article
+              key={`${note}-${index}`}
+              className={cn(
+                "min-h-32 rounded-md border p-4 shadow-sm",
+                noteStyles[index % noteStyles.length],
+              )}
+            >
+              <p className="text-xs font-black uppercase text-slate-500">Nota {index + 1}</p>
+              <p className="mt-3 text-sm leading-6 text-slate-800">{note}</p>
+            </article>
+          ))}
+          {!notes.length ? (
+            <div className="rounded-md border border-dashed border-slate-300 p-8 text-center text-slate-500">
+              Todavía no hay notas.
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function SetupPanel({
   isPending,
   startTransition,
@@ -1243,6 +1866,25 @@ function escapeHtml(value: string): string {
 
 function categoryLabel(category: PlaceCategory): string {
   return placeCategories.find((item) => item.value === category)?.label ?? "Otro";
+}
+
+function getWorkspaceFirstDayId(workspace: TripWorkspace): string {
+  const activeTrip =
+    workspace.trips.find((trip) => trip.id === workspace.activeTripId) ??
+    workspace.trips[0];
+  return activeTrip?.days[0]?.id ?? "";
+}
+
+function getDefaultCoordinates(dayPlaces: Place[], tripPlaces: Place[]) {
+  const candidates = dayPlaces.length ? dayPlaces : tripPlaces;
+  if (!candidates.length) {
+    return { lat: 41.9028, lng: 12.4964 };
+  }
+
+  return {
+    lat: candidates.reduce((total, place) => total + place.lat, 0) / candidates.length,
+    lng: candidates.reduce((total, place) => total + place.lng, 0) / candidates.length,
+  };
 }
 
 function getBounds(places: Place[]) {
